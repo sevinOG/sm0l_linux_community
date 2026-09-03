@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=sm0l
+Comment=Tiny local Ollama coding agent
+Exec=@EXEC@
+Icon=@ICON@
+Terminal=false
+Categories=Development;Utility;
+StartupWMClass=sm0l
+Keywords=ollama;llm;coding;agent;
