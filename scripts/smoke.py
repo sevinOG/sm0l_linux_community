@@ -9,6 +9,7 @@ sys.path.insert(0, str(ROOT))
 
 from src.agent import parse_text_tool_calls
 from src.compact import compact_threshold, estimate_tokens, split_for_compact
+from src.media import attachments_to_b64, prepare_ollama_messages, save_encoded
 from src.tools import clip, html_to_text, run_tool, tool_edit_file, tool_write_file
 
 
@@ -78,6 +79,22 @@ def main() -> None:
     check(str(config_path()).endswith("xdg_config/sm0l/config.json"), "config XDG path")
     check(str(user_data()).endswith("xdg_data/sm0l"), "data XDG path")
     check(default_workspace().name == "sm0l_workspace", "default workspace")
+
+    png = bytes.fromhex(
+        "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489"
+        "0000000a49444154789c63000100000500010d0a2db40000000049454e44ae426082"
+    )
+    att = save_encoded(png, "image/png", "dot.png")
+    check(Path(att["path"]).is_file(), "media save")
+    b64 = attachments_to_b64([att])
+    check(len(b64) == 1 and len(b64[0]) > 8, "media b64")
+    msgs = [{"role": "user", "content": "see", "attachments": [att]}]
+    prep = prepare_ollama_messages(msgs)
+    check("images" in prep[0] and "attachments" not in prep[0], "ollama images field")
+    check(
+        estimate_tokens(msgs) > estimate_tokens([{"role": "user", "content": "see"}]),
+        "image token estimate",
+    )
 
     print("all smoke checks passed")
 

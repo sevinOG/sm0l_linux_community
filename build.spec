@@ -35,6 +35,7 @@ a = Analysis(
         "src.config",
         "src.paths",
         "src.personality",
+        "src.media",
     ],
     hookspath=[],
     hooksconfig={},

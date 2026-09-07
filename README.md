@@ -69,6 +69,9 @@ python3 -m venv .venv
 2. In the right panel, Pull `qwen2.5:7b` (or Refresh if you already have a model).
 3. Set workspace if you want a project folder.
 4. Type. Enter sends. Shift+Enter is a newline.
+5. Paste, drop, or click **Image** to attach pictures to the message being composed (up to 4).
+
+Attached images are stored in `$XDG_DATA_HOME/sm0l/media/` (or `~/.local/share/sm0l/media/`) and sent to Ollama as vision attachments. Use a vision-capable model (`qwen2.5vl`, `llava`, `minicpm-v`, …).
 
 ## Build
 
