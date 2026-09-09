@@ -38,9 +38,9 @@ from .agent import Agent
 from .compact import compact_threshold, estimate_tokens, reset_calibration
 from .config import Settings, save_settings
 from .media import MAX_ATTACH, attachments_of, encode_qimage, is_image_path, save_encoded
-from .ollama_client import list_models, native_context_length, ping, pull_model
 from .paths import user_data
 from .personality import seed_workspace
+from .providers import client_for, default_host, host_for, label_for
 from .session import Session, delete_session, list_sessions, load_session, new_session
 from .theme import TEXT, TEXT_MUTED, TEXT_DIM
 
@@ -67,9 +67,10 @@ class AgentWorker(QThread):
             self.event.emit(kind, data)
 
         self.agent = Agent(
-            self.settings.ollama_host,
+            host_for(self.settings),
             self.model,
             self.settings.resolved_workspace(),
+            provider=self.settings.provider,
             num_ctx_override=self.settings.num_ctx,
             temperature=self.settings.temperature,
             compact_ratio=self.settings.compact_ratio,
@@ -100,14 +101,15 @@ class PullWorker(QThread):
     done = pyqtSignal(str)
     failed = pyqtSignal(str)
 
-    def __init__(self, host: str, name: str):
+    def __init__(self, client, host: str, name: str):
         super().__init__()
+        self.client = client
         self.host = host
         self.name = name
 
     def run(self):
         try:
-            pull_model(self.host, self.name, on_status=self.status.emit)
+            self.client.pull_model(self.host, self.name, on_status=self.status.emit)
             self.done.emit(self.name)
         except Exception as e:
             self.failed.emit(str(e))
@@ -274,7 +276,7 @@ class Dashboard(QMainWindow):
         brand_col.setSpacing(2)
         brand = QLabel("SM0L")
         brand.setObjectName("Brand")
-        sub = QLabel("LOCAL AGENT  ·  OLLAMA  ·  5–8B")
+        sub = QLabel("LOCAL AGENT  ·  OLLAMA + LM STUDIO  ·  5–8B")
         sub.setObjectName("BrandSub")
         brand_col.addWidget(brand)
         brand_col.addWidget(sub)
@@ -461,8 +463,14 @@ class Dashboard(QMainWindow):
         lab3 = QLabel("SETTINGS")
         lab3.setObjectName("Section")
         lay.addWidget(lab3)
-        lay.addWidget(self._lbl("Ollama host"))
-        self.host_edit = QLineEdit(self.settings.ollama_host)
+        lay.addWidget(self._lbl("Provider"))
+        self.provider_combo = QComboBox()
+        self.provider_combo.addItems(["Ollama", "LM Studio"])
+        self.provider_combo.setCurrentText(label_for(self.settings.provider))
+        self.provider_combo.currentTextChanged.connect(self._on_provider_changed)
+        lay.addWidget(self.provider_combo)
+        lay.addWidget(self._lbl("Host"))
+        self.host_edit = QLineEdit(host_for(self.settings))
         self.host_edit.editingFinished.connect(self._save_settings_from_ui)
         lay.addWidget(self.host_edit)
         row = QHBoxLayout()
@@ -486,10 +494,10 @@ class Dashboard(QMainWindow):
         row.addLayout(col2)
         lay.addLayout(row)
 
-        lay.addWidget(self._lbl("Pull model via Ollama"))
+        self.pull_lbl = self._lbl("Pull model (Ollama only)")
+        lay.addWidget(self.pull_lbl)
         pull_row = QHBoxLayout()
         self.pull_edit = QLineEdit()
-        self.pull_edit.setPlaceholderText("qwen2.5:7b")
         self.pull_btn = QPushButton("Pull")
         self.pull_btn.setObjectName("ghost")
         self.pull_btn.clicked.connect(self._pull_model)
@@ -500,6 +508,7 @@ class Dashboard(QMainWindow):
         hint.setObjectName("Dim")
         hint.setWordWrap(True)
         lay.addWidget(hint)
+        self._apply_provider_ui()
         return wrap
 
     def _lbl(self, text: str) -> QLabel:
@@ -698,7 +707,9 @@ class Dashboard(QMainWindow):
             self.effective_ctx = 0
             self._ctx_model = model
         try:
-            self.native_ctx = native_context_length(self.settings.ollama_host, model)
+            self.native_ctx = client_for(self.settings.provider).native_context_length(
+                host_for(self.settings), model
+            )
         except Exception:
             self.native_ctx = 8192
         self.session.native_ctx = self.native_ctx
@@ -732,9 +743,9 @@ class Dashboard(QMainWindow):
         self.model_combo.blockSignals(True)
         self.model_combo.clear()
         try:
-            models = list_models(self.settings.ollama_host)
+            models = client_for(self.settings.provider).list_models(host_for(self.settings))
         except Exception as e:
-            self.status_line.setText(f"Ollama model list failed: {e}")
+            self.status_line.setText(f"{label_for(self.settings.provider)} model list failed: {e}")
             models = []
         names = [m["name"] for m in models]
         self.model_combo.addItems(names)
@@ -751,8 +762,9 @@ class Dashboard(QMainWindow):
             self._refresh_ctx_for_model()
 
     def _tick_ollama(self):
-        online = ping(self.settings.ollama_host)
-        self.status_dot.setText("ollama on" if online else "ollama off")
+        online = client_for(self.settings.provider).ping(host_for(self.settings))
+        tag = "ollama" if self.settings.provider == "ollama" else "lmstudio"
+        self.status_dot.setText(f"{tag} on" if online else f"{tag} off")
         self.status_dot.setProperty("state", "online" if online else "offline")
         self.status_dot.style().unpolish(self.status_dot)
         self.status_dot.style().polish(self.status_dot)
@@ -769,19 +781,54 @@ class Dashboard(QMainWindow):
         self.ws_label.setText(path)
 
     def _save_settings_from_ui(self):
-        self.settings.ollama_host = self.host_edit.text().strip() or "http://127.0.0.1:11434"
+        host = self.host_edit.text().strip() or default_host(self.settings.provider)
+        if self.settings.provider == "lmstudio":
+            self.settings.lmstudio_host = host
+        else:
+            self.settings.ollama_host = host
         self.settings.temperature = float(self.temp_spin.value())
         self.settings.num_ctx = int(self.ctx_spin.value())
         save_settings(self.settings)
         self._update_ctx_bar()
 
+    def _apply_provider_ui(self):
+        is_ollama = self.settings.provider == "ollama"
+        self.host_edit.setText(host_for(self.settings))
+        self.pull_btn.setEnabled(is_ollama)
+        self.pull_edit.setEnabled(is_ollama)
+        self.pull_lbl.setText("Pull model (Ollama only)")
+        self.pull_edit.setPlaceholderText(
+            "qwen2.5:7b" if is_ollama else "Use LM Studio's Discover tab, or `lms get <model>`"
+        )
+
+    def _on_provider_changed(self, label: str):
+        provider = "lmstudio" if label == "LM Studio" else "ollama"
+        if provider == self.settings.provider:
+            return
+        self.settings.provider = provider
+        save_settings(self.settings)
+        self._apply_provider_ui()
+        reset_calibration()
+        self.effective_ctx = 0
+        self.last_prompt_tokens = 0
+        self._reload_models()
+        self._tick_ollama()
+
     def _pull_model(self):
+        if self.settings.provider != "ollama":
+            QMessageBox.information(
+                self,
+                "Pull unavailable",
+                "LM Studio has no API to pull models. Download it from LM Studio's "
+                "Discover tab (or `lms get <model>`), then hit Refresh.",
+            )
+            return
         name = self.pull_edit.text().strip()
         if not name:
             return
         self.pull_btn.setEnabled(False)
         self.status_line.setText(f"Pulling {name}…")
-        self.puller = PullWorker(self.settings.ollama_host, name)
+        self.puller = PullWorker(client_for(self.settings.provider), host_for(self.settings), name)
         self.puller.status.connect(lambda s: self.status_line.setText(s))
         self.puller.done.connect(self._on_pulled)
         self.puller.failed.connect(self._on_pull_fail)
@@ -916,18 +963,21 @@ class Dashboard(QMainWindow):
         if self.worker and self.worker.isRunning():
             return False
         model = self._current_model()
+        provider_label = label_for(self.settings.provider)
         if not model:
-            QMessageBox.information(
-                self,
-                "No model",
-                "Start Ollama, then Refresh, or Pull qwen2.5:7b from the right panel.",
+            hint = (
+                "Start Ollama, then Refresh, or Pull qwen2.5:7b from the right panel."
+                if self.settings.provider == "ollama"
+                else "Start LM Studio, load a model, then Refresh from the right panel."
             )
+            QMessageBox.information(self, "No model", hint)
             return False
-        if not ping(self.settings.ollama_host):
+        host = host_for(self.settings)
+        if not client_for(self.settings.provider).ping(host):
             QMessageBox.warning(
                 self,
-                "Ollama offline",
-                f"Nothing is listening at {self.settings.ollama_host}.\nStart Ollama and try again.",
+                f"{provider_label} offline",
+                f"Nothing is listening at {host}.\nStart {provider_label} and try again.",
             )
             return False
         self._user_stopped = False

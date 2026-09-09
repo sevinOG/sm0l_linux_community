@@ -5,7 +5,7 @@ import logging
 from typing import Callable
 
 from .media import IMAGE_TOKENS, attachment_count
-from .ollama_client import chat_once
+from .providers import client_for
 
 logger = logging.getLogger(__name__)
 
@@ -329,6 +329,7 @@ def compact_messages(
     *,
     num_ctx: int,
     ratio: float = 0.62,
+    provider: str = "ollama",
     on_status: Callable[[str], None] | None = None,
 ) -> tuple[list[dict], str | None]:
     """
@@ -382,7 +383,7 @@ def compact_messages(
     result = None
     summary = ""
     try:
-        result = chat_once(
+        result = client_for(provider).chat_once(
             host,
             model,
             [
@@ -409,7 +410,7 @@ def compact_messages(
     # ----- Empty / failed compact -----
     if not summary:
         # `result` is always defined here (None on exception, dict otherwise).
-        logger.error("Empty summary from Ollama: %r", result)
+        logger.error("Empty summary from %s: %r", provider, result)
         # Build a clean fallback: primary system + non-system suffix, no full history.
         kept = [primary] + suffix_non_sys
         kept = hard_trim_messages(kept, thresh)

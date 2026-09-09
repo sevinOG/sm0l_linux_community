@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import base64
+import json
 import uuid
 from pathlib import Path
 from typing import Any
@@ -91,6 +92,70 @@ def prepare_ollama_messages(messages: list[dict]) -> list[dict]:
         if b64s:
             mm["images"] = b64s
         prepared.append(mm)
+    return prepared
+
+
+def _stringify_tool_args(args: Any) -> str:
+    if isinstance(args, str):
+        return args
+    try:
+        return json.dumps(args or {}, ensure_ascii=False)
+    except Exception:
+        return "{}"
+
+
+def prepare_openai_messages(messages: list[dict]) -> list[dict]:
+    """Shape messages for an OpenAI-compatible endpoint (LM Studio).
+
+    User turns with attachments become a `content` array of text + `image_url`
+    parts (data URIs). Assistant `tool_calls` get JSON-stringified arguments,
+    since the OpenAI wire format requires a string there. Tool results drop
+    local-only bookkeeping fields (`tool_name`).
+    """
+    prepared: list[dict] = []
+    for m in messages:
+        role = m.get("role")
+        if role == "tool":
+            prepared.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": m.get("tool_call_id") or "",
+                    "content": m.get("content") or "",
+                }
+            )
+            continue
+
+        out: dict[str, Any] = {"role": role}
+        content = m.get("content") or ""
+        atts = attachments_of(m) if role == "user" else []
+        if atts:
+            parts: list[dict] = []
+            if content:
+                parts.append({"type": "text", "text": content})
+            for a, b64 in zip(atts, attachments_to_b64(atts)):
+                mime = a.get("mime") or "image/png"
+                parts.append({"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}})
+            out["content"] = parts
+        else:
+            out["content"] = content
+
+        tool_calls = m.get("tool_calls")
+        if tool_calls:
+            fixed = []
+            for tc in tool_calls:
+                fn = tc.get("function") or tc
+                fixed.append(
+                    {
+                        "id": tc.get("id") or uuid.uuid4().hex,
+                        "type": "function",
+                        "function": {
+                            "name": fn.get("name") or "",
+                            "arguments": _stringify_tool_args(fn.get("arguments")),
+                        },
+                    }
+                )
+            out["tool_calls"] = fixed
+        prepared.append(out)
     return prepared
 
 

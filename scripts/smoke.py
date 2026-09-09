@@ -9,7 +9,7 @@ sys.path.insert(0, str(ROOT))
 
 from src.agent import parse_text_tool_calls
 from src.compact import compact_threshold, estimate_tokens, split_for_compact
-from src.media import attachments_to_b64, prepare_ollama_messages, save_encoded
+from src.media import attachments_to_b64, prepare_ollama_messages, prepare_openai_messages, save_encoded
 from src.tools import clip, html_to_text, run_tool, tool_edit_file, tool_write_file
 
 
@@ -91,6 +91,22 @@ def main() -> None:
     msgs = [{"role": "user", "content": "see", "attachments": [att]}]
     prep = prepare_ollama_messages(msgs)
     check("images" in prep[0] and "attachments" not in prep[0], "ollama images field")
+    oa_prep = prepare_openai_messages(msgs)
+    check(
+        isinstance(oa_prep[0]["content"], list)
+        and any(p.get("type") == "image_url" for p in oa_prep[0]["content"]),
+        "openai image_url field",
+    )
+    tool_msgs = [
+        {"role": "assistant", "content": "", "tool_calls": [{"function": {"name": "search", "arguments": {"query": "x"}}}]},
+        {"role": "tool", "content": "hits", "tool_name": "search", "tool_call_id": "abc"},
+    ]
+    oa_tools = prepare_openai_messages(tool_msgs)
+    check(
+        isinstance(oa_tools[0]["tool_calls"][0]["function"]["arguments"], str),
+        "openai tool_call arguments stringified",
+    )
+    check("tool_name" not in oa_tools[1] and oa_tools[1]["tool_call_id"] == "abc", "openai tool result shape")
     check(
         estimate_tokens(msgs) > estimate_tokens([{"role": "user", "content": "see"}]),
         "image token estimate",

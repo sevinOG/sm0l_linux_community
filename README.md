@@ -9,10 +9,10 @@ This is the Linux port of sm0l. Line endings are LF. Shell, paths, fonts, and in
 
 ## What it is
 
-A PyQt6 dashboard (Eche-purple) that talks to a local Ollama daemon:
+A PyQt6 dashboard (Eche-purple) that talks to a local Ollama or LM Studio server:
 
 - Chat, sessions, workspace picker
-- Model list / pull from the UI (no CLI)
+- Model list / pull from the UI (no CLI) — Ollama only; LM Studio models are downloaded from its own Discover tab or `lms get`
 - DuckDuckGo search + page fetch
 - Files + shell for coding on this machine
 - Autocompact using the **same** model when the window fills
@@ -23,7 +23,7 @@ It will not ping you, cron itself, or invent a turn. You send a message or nothi
 
 - Linux (X11 or Wayland)
 - Python 3.11+ (to build or run from source)
-- [Ollama](https://ollama.com) running locally
+- [Ollama](https://ollama.com) **or** [LM Studio](https://lmstudio.ai) running locally (pick one in the Settings panel)
 - A local chat model
 - Qt runtime libs (pulled in by the `PyQt6` wheel for most distros)
 
@@ -65,13 +65,21 @@ python3 -m venv .venv
 .venv/bin/python sm0l.py
 ```
 
-1. Start Ollama (`ollama serve` if it is not already a service).
-2. In the right panel, Pull `qwen2.5:7b` (or Refresh if you already have a model).
+1. Start Ollama (`ollama serve` if it is not already a service) **or** start LM Studio's local server (LM Studio → Developer tab → Start Server).
+2. In the right panel, pick **Provider** (Ollama or LM Studio) and set **Host** if it's not the default.
+   - Ollama: Pull `qwen2.5:7b` from the right panel (or Refresh if you already have a model).
+   - LM Studio: download/load a model from LM Studio itself, then hit **Refresh** — sm0l has no pull API for LM Studio.
 3. Set workspace if you want a project folder.
 4. Type. Enter sends. Shift+Enter is a newline.
 5. Paste, drop, or click **Image** to attach pictures to the message being composed (up to 4).
 
-Attached images are stored in `$XDG_DATA_HOME/sm0l/media/` (or `~/.local/share/sm0l/media/`) and sent to Ollama as vision attachments. Use a vision-capable model (`qwen2.5vl`, `llava`, `minicpm-v`, …).
+Attached images are stored in `$XDG_DATA_HOME/sm0l/media/` (or `~/.local/share/sm0l/media/`) and sent as vision attachments to whichever provider is selected. Use a vision-capable model (`qwen2.5vl`, `llava`, `minicpm-v`, …).
+
+### LM Studio notes
+
+- Default host: `http://127.0.0.1:1234`. sm0l talks to LM Studio's OpenAI-compatible `/api/v0/*` endpoints (model list, context length, chat + tool calling, streaming).
+- Model pulling isn't exposed over LM Studio's API — get models via its Discover tab or the `lms` CLI, then **Refresh** in sm0l.
+- Tool calling requires a model LM Studio has marked tool-capable; if a model rejects `tools`, sm0l retries once without them (same fallback as Ollama) and falls back to the `<tool_call>` XML convention.
 
 ## Build
 
@@ -115,7 +123,7 @@ echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
 
 | Constraint | How sm0l handles it |
 |---|---|
-| Small context | Detect native `context_length` via Ollama `/api/show`, compact at ~62% |
+| Small context | Detect native context window (Ollama `/api/show` or LM Studio `/api/v0/models`), compact at ~62% |
 | Weak long-prompt following | RUNTIME + single OPERATIONS.md digest stay tiny |
 | Tool-call drift | 8 tools, 8 round cap, XML fallback if native tools fail |
 | Huge tool dumps | Hard clip on search/fetch/read/shell |
