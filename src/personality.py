@@ -64,6 +64,8 @@ BOOTSTRAP_OPERATIONS = """# OPERATIONS.md — sm0l
 - `src/personality.py` — RUNTIME + OPERATIONS.md injection
 - `src/compact.py` — context compaction
 - `src/ollama_client.py` — Ollama API
+- `src/lmstudio_client.py` — LM Studio API
+- `src/providers.py` — provider dispatch (Ollama / LM Studio)
 - `src/ui.py` — PyQt dashboard
 - Do not "fix" product bugs by only rewriting OPERATIONS.md when the bug is in `src/`.
 """

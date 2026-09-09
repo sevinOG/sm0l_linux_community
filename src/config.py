@@ -10,7 +10,9 @@ from .paths import config_path, default_workspace
 
 @dataclass
 class Settings:
+    provider: str = "ollama"  # "ollama" or "lmstudio"
     ollama_host: str = "http://127.0.0.1:11434"
+    lmstudio_host: str = "http://127.0.0.1:1234"
     model: str = ""
     num_ctx: int = 0  # 0 = auto from model native window
     temperature: float = 0.2

@@ -15,8 +15,8 @@ from .compact import (
     message_chars,
     get_cpt,
 )
-from .ollama_client import chat_stream, effective_num_ctx
 from .personality import build_system_prompt
+from .providers import client_for
 from .tools import SCHEMAS, run_tool
 
 TOOL_RE = re.compile(r"<tool_call>\s*(\{.*?\})\s*</tool_call>", re.S)
@@ -85,6 +85,7 @@ class Agent:
         model: str,
         workspace,
         *,
+        provider: str = "ollama",
         num_ctx_override: int = 0,
         temperature: float = 0.2,
         compact_ratio: float = 0.62,
@@ -95,6 +96,8 @@ class Agent:
         self.host = host.rstrip("/")
         self.model = model
         self.workspace = workspace
+        self.provider = provider
+        self.client = client_for(provider)
         self.num_ctx_override = num_ctx_override
         self.temperature = temperature
         self.compact_ratio = compact_ratio
@@ -116,7 +119,7 @@ class Agent:
 
     def run(self, messages: list[dict]) -> list[dict]:
         self._cancel = False
-        self.num_ctx = effective_num_ctx(self.host, self.model, self.num_ctx_override)
+        self.num_ctx = self.client.effective_num_ctx(self.host, self.model, self.num_ctx_override)
         # P2-3: expose the same effective ctx to the UI so the bar and the
         # compact threshold agree with what the agent actually uses.
         self.effective_ctx = self.num_ctx
@@ -128,6 +131,7 @@ class Agent:
             messages,
             num_ctx=self.num_ctx,
             ratio=self.compact_ratio,
+            provider=self.provider,
             on_status=lambda s: self._fire("compact", text=s),
         )
         messages = compacted
@@ -167,7 +171,7 @@ class Agent:
                 self._fire("token", text=piece)
 
             try:
-                result = chat_stream(
+                result = self.client.chat_stream(
                     self.host,
                     self.model,
                     messages,
@@ -258,6 +262,7 @@ class Agent:
                         messages,
                         num_ctx=self.num_ctx,
                         ratio=self.compact_ratio,
+                        provider=self.provider,
                         on_status=lambda s: self._fire("compact", text=s),
                     )
                     messages = compacted
