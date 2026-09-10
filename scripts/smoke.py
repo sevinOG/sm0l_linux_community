@@ -1,6 +1,7 @@
 """Headless checks — no GUI, no Ollama required."""
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -9,6 +10,7 @@ sys.path.insert(0, str(ROOT))
 
 from src.agent import parse_text_tool_calls
 from src.compact import compact_threshold, estimate_tokens, split_for_compact
+from src.lmstudio_client import _consume_sse
 from src.media import attachments_to_b64, prepare_ollama_messages, prepare_openai_messages, save_encoded
 from src.tools import clip, html_to_text, run_tool, tool_edit_file, tool_write_file
 
@@ -111,6 +113,36 @@ def main() -> None:
         estimate_tokens(msgs) > estimate_tokens([{"role": "user", "content": "see"}]),
         "image token estimate",
     )
+
+    # ---- LM Studio SSE reassembly: realistic fragmented tool-call deltas ----
+    # Simulates: name/id on the first delta only, arguments split across many
+    # chunks (including a split mid-string-escape), a chunk with empty
+    # choices carrying partial usage, then a [DONE] marker followed by a
+    # straggler usage-only chunk some servers send late. One garbage line is
+    # mixed in to confirm a single bad chunk doesn't abort the stream.
+    sse_lines = [
+        'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"search","arguments":""}}]}}]}',
+        'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\\"query\\""}}]}}]}',
+        "data: not-json-garbage-should-be-skipped",
+        'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":":\\"sm0l gith"}}]}}]}',
+        'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"ub\\"}"}}]}}],"usage":{"prompt_tokens":42}}',
+        'data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}',
+        "data: [DONE]",
+        'data: {"usage":{"prompt_tokens":42,"completion_tokens":9}}',
+    ]
+    tokens: list[str] = []
+    result = _consume_sse((ln.encode() for ln in sse_lines), on_token=tokens.append)
+    calls = result["message"].get("tool_calls") or []
+    check(len(calls) == 1, "sse: exactly one assembled tool call")
+    check(calls[0]["id"] == "call_1", "sse: id from first delta survives later chunks")
+    check(calls[0]["function"]["name"] == "search", "sse: name from first delta survives later chunks")
+    check(
+        json.loads(calls[0]["function"]["arguments"]) == {"query": "sm0l github"},
+        "sse: fragmented arguments concatenated in order into valid JSON",
+    )
+    check(result["prompt_eval_count"] == 42, "sse: usage captured before [DONE]")
+    check(result["eval_count"] == 9, "sse: usage arriving after [DONE] is not dropped")
+    check(tokens == [], "sse: tool-call-only stream emits no content tokens")
 
     print("all smoke checks passed")
 

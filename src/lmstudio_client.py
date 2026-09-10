@@ -9,11 +9,14 @@ LM Studio speaks an OpenAI-compatible API. We use its `/api/v0/*` routes
 from __future__ import annotations
 
 import json
+import logging
 import urllib.error
 import urllib.request
 import uuid
-from typing import Any, Callable
+from typing import Any, Callable, Iterable
 from urllib.parse import urljoin
+
+logger = logging.getLogger(__name__)
 
 
 def _url(host: str, path: str) -> str:
@@ -118,14 +121,125 @@ def _stringify_args(args: Any) -> str:
 
 
 def _assemble_message(content: str, tool_calls: dict[int, dict]) -> dict:
+    """Finalize accumulated streaming/non-streaming tool-call slots into a
+    message. Logs (never raises) when a call looks broken, so a bad delta
+    sequence from a given model/server is easy to spot in the logs instead
+    of silently producing a tool call the agent loop can't use.
+    """
     message: dict[str, Any] = {"role": "assistant", "content": content}
     ordered = [tool_calls[i] for i in sorted(tool_calls)]
     for tc in ordered:
         if not tc.get("id"):
             tc["id"] = uuid.uuid4().hex
+        fn = tc.get("function") or {}
+        name = fn.get("name") or ""
+        args = fn.get("arguments") or ""
+        if not name:
+            logger.warning("LM Studio tool call arrived with no function name: %r", tc)
+        if args:
+            try:
+                json.loads(args)
+            except json.JSONDecodeError:
+                logger.warning(
+                    "LM Studio tool call %r has malformed JSON arguments (likely a dropped "
+                    "or out-of-order SSE chunk): %r",
+                    name or "?",
+                    args[:300],
+                )
     if ordered:
         message["tool_calls"] = ordered
     return message
+
+
+def _consume_sse(
+    lines: Iterable[bytes | str],
+    *,
+    on_token: Callable[[str], None] | None = None,
+    should_cancel: Callable[[], bool] | None = None,
+) -> dict:
+    """Parse an OpenAI-style `text/event-stream` body into assembled content,
+    tool calls, and usage. Split out from `chat_stream` so this reassembly
+    logic is unit-testable with a plain list of lines — no live server or
+    urllib mocking needed.
+
+    Defensive by design because real servers are messier than the spec:
+    - Tool-call `arguments` routinely arrive as many small string fragments
+      across separate deltas; they are concatenated in event order.
+    - `id` / `function.name` are often sent once on the first delta for a
+      given `index` and omitted afterward — later deltas only patch
+      `arguments`, so a slot's `id`/`name` are only overwritten when a chunk
+      actually carries a truthy value.
+    - `usage` (and, on some servers, a final near-empty chunk) can show up
+      attached to a chunk whose `choices` is empty, or even after the
+      `[DONE]` marker — `[DONE]` is treated as "stop expecting content", not
+      "stop reading the stream".
+    - A single malformed chunk (bad JSON, unexpected shape) is logged and
+      skipped rather than aborting the whole turn.
+    """
+    content = ""
+    tool_calls: dict[int, dict] = {}
+    prompt_eval = 0
+    eval_count = 0
+    done = False
+
+    for raw in lines:
+        if should_cancel and should_cancel():
+            break
+        line = raw.decode("utf-8", errors="replace") if isinstance(raw, (bytes, bytearray)) else str(raw)
+        line = line.strip()
+        if not line or not line.startswith("data:"):
+            continue
+        line = line[len("data:"):].strip()
+        if line == "[DONE]":
+            # Keep reading — some servers trail a usage-only chunk after this.
+            done = True
+            continue
+        try:
+            chunk = json.loads(line)
+        except json.JSONDecodeError:
+            logger.debug("LM Studio stream: skipping non-JSON chunk: %r", line[:200])
+            continue
+        if not isinstance(chunk, dict):
+            continue
+        try:
+            if not done:
+                choices = chunk.get("choices") or []
+                if choices and isinstance(choices[0], dict):
+                    delta = choices[0].get("delta") or {}
+                    piece = delta.get("content") or ""
+                    if piece:
+                        content += piece
+                        if on_token:
+                            on_token(piece)
+                    for tc in delta.get("tool_calls") or []:
+                        if not isinstance(tc, dict):
+                            continue
+                        idx = tc.get("index", 0)
+                        slot = tool_calls.setdefault(
+                            idx,
+                            {"id": "", "type": "function", "function": {"name": "", "arguments": ""}},
+                        )
+                        if tc.get("id"):
+                            slot["id"] = tc["id"]
+                        fn = tc.get("function") or {}
+                        if fn.get("name"):
+                            slot["function"]["name"] = fn["name"]
+                        if fn.get("arguments"):
+                            slot["function"]["arguments"] += fn["arguments"]
+            usage = chunk.get("usage") or {}
+            if usage.get("prompt_tokens"):
+                prompt_eval = int(usage["prompt_tokens"])
+            if usage.get("completion_tokens"):
+                eval_count = int(usage["completion_tokens"])
+        except Exception:
+            logger.debug("LM Studio stream: malformed chunk, skipping: %r", chunk, exc_info=True)
+            continue
+
+    return {
+        "message": _assemble_message(content, tool_calls),
+        "prompt_eval_count": prompt_eval,
+        "eval_count": eval_count,
+    }
 
 
 def chat_once(
@@ -158,6 +272,8 @@ def chat_once(
     usage = data.get("usage") or {}
     tool_calls: dict[int, dict] = {}
     for i, tc in enumerate(msg.get("tool_calls") or []):
+        if not isinstance(tc, dict):
+            continue
         fn = tc.get("function") or {}
         tool_calls[i] = {
             "id": tc.get("id") or "",
@@ -212,63 +328,16 @@ def chat_stream(
             headers={"Content-Type": "application/json", "Accept": "text/event-stream"},
             method="POST",
         )
-        content = ""
-        tool_calls: dict[int, dict] = {}
-        prompt_eval = 0
-        eval_count = 0
         try:
             with urllib.request.urlopen(req, timeout=timeout) as resp:
-                for raw in resp:
-                    if should_cancel and should_cancel():
-                        break
-                    line = raw.decode("utf-8", errors="replace").strip()
-                    if not line or not line.startswith("data:"):
-                        continue
-                    line = line[len("data:"):].strip()
-                    if line == "[DONE]":
-                        break
-                    try:
-                        chunk = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-                    choices = chunk.get("choices") or []
-                    if choices:
-                        delta = choices[0].get("delta") or {}
-                        piece = delta.get("content") or ""
-                        if piece:
-                            content += piece
-                            if on_token:
-                                on_token(piece)
-                        for tc in delta.get("tool_calls") or []:
-                            idx = tc.get("index", 0)
-                            slot = tool_calls.setdefault(
-                                idx,
-                                {"id": "", "type": "function", "function": {"name": "", "arguments": ""}},
-                            )
-                            if tc.get("id"):
-                                slot["id"] = tc["id"]
-                            fn = tc.get("function") or {}
-                            if fn.get("name"):
-                                slot["function"]["name"] = fn["name"]
-                            if fn.get("arguments"):
-                                slot["function"]["arguments"] += fn["arguments"]
-                    usage = chunk.get("usage") or {}
-                    if usage.get("prompt_tokens"):
-                        prompt_eval = int(usage["prompt_tokens"])
-                    if usage.get("completion_tokens"):
-                        eval_count = int(usage["completion_tokens"])
+                result = _consume_sse(resp, on_token=on_token, should_cancel=should_cancel)
         except urllib.error.HTTPError as e:
             err = e.read().decode("utf-8", errors="replace")
             raise RuntimeError(f"LM Studio HTTP {e.code}: {err[:400]}") from e
         except urllib.error.URLError as e:
             raise RuntimeError(f"LM Studio unreachable at {host}: {e.reason}") from e
-        result = _assemble_message(content, tool_calls)
-        return {
-            "message": result,
-            "prompt_eval_count": prompt_eval,
-            "eval_count": eval_count,
-            "used_tools_api": with_tools,
-        }
+        result["used_tools_api"] = with_tools
+        return result
 
     try:
         return _run(bool(tools))
