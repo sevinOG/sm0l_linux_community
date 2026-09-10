@@ -80,6 +80,7 @@ Attached images are stored in `$XDG_DATA_HOME/sm0l/media/` (or `~/.local/share/s
 - Default host: `http://127.0.0.1:1234`. sm0l talks to LM Studio's OpenAI-compatible `/api/v0/*` endpoints (model list, context length, chat + tool calling, streaming).
 - Model pulling isn't exposed over LM Studio's API — get models via its Discover tab or the `lms` CLI, then **Refresh** in sm0l.
 - Tool calling requires a model LM Studio has marked tool-capable; if a model rejects `tools`, sm0l retries once without them (same fallback as Ollama) and falls back to the `<tool_call>` XML convention.
+- `scripts/test_lmstudio.py` is an optional live check (set `LMSTUDIO_HOST` to run it) — see [docs/lmstudio.md](docs/lmstudio.md) for that plus the full manual end-to-end checklist (streaming, tool calling, vision, compaction, cancel, provider switching).
 
 ## Build
 
